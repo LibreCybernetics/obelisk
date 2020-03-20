@@ -736,6 +736,34 @@ nixBuildAttrWithCache exprPath attr = readThunk exprPath >>= \case
         , _target_expr = Nothing
         }
 
+data ThunkCloneConfig = ThunkCloneConfig
+  { _thunkCloneConfig_remote :: String
+  , _thunkCloneConfig_directory :: Maybe String
+  , _thunkCloneConfig_branch :: Maybe String
+  , _thunkCloneConfig_recursive :: Bool
+  , _thunkCloneConfig_extraArgs :: Maybe String
+  } deriving (Eq, Ord, Show)
+
+cloneThunk :: MonadObelisk m => ThunkCloneConfig -> m ()
+cloneThunk config = do
+  let dir = fromMaybe (dropExtension $ takeFileName $ _thunkCloneConfig_remote config) $ _thunkCloneConfig_directory config
+  when (null dir) $ failWith "Inable to determine clone destination directory"
+  let checkoutDir = dir </> unpackedDirName
+  dirExists <- liftIO $ doesDirectoryExist dir
+  when dirExists $ do
+    items <- liftIO $ listDirectory dir
+    when (not $ null items) $ failWith [i|Destination thunk ${dir} already exists and is not an empty directory|]
+  callProcessAndLogOutput (Notice, Error) $ proc "git" $
+    [ "clone"
+    , _thunkCloneConfig_remote config
+    , checkoutDir
+    ]
+    <> ["--recursive" | _thunkCloneConfig_recursive config]
+    <> concat [["--branch", b] | b <- maybeToList $ _thunkCloneConfig_branch config]
+    <> maybe [] words (_thunkCloneConfig_extraArgs config)
+  thunkPtr <- getThunkPtr False checkoutDir Nothing
+  createThunk dir thunkPtr
+
 -- | Safely update thunk using a custom action
 --
 -- A temporary working space is used to do any update. When the custom
@@ -932,8 +960,9 @@ getThunkPtr checkClean dir mPrivate = do
         \pushed but this repo's remote tracking branches don't know it.)"
       ]
 
-  -- We assume it's safe to pack the thunk at this point
-  putLog Informational "All changes safe in git remotes. OK to pack thunk."
+  when checkClean $ do
+    -- We assume it's safe to pack the thunk at this point
+    putLog Informational "All changes safe in git remotes. OK to pack thunk."
 
   let remote = maybe "origin" snd $ flip Map.lookup headUpstream =<< mCurrentBranch
 
